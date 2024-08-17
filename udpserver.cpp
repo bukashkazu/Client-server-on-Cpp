@@ -1,202 +1,203 @@
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netdb.h>
-#include <errno.h>
 #include <stdio.h>
-#include <string.h>
-#include <unistd.h> 
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
-#include <sys/stat.h>
-#include <poll.h>
+#include <sys/socket.h>
+#include <sys/poll.h>
 #include <time.h>
 
+#define BUFFER_SIZE 10000
+#define TIMEOUT 30000  
+#define MAX_MSGS 21
+#define MAX_CLIENTS 101
+#define FILENAME "msg.txt"
+#define TIMEOUT_IN_POLL 0
+#define ADDR_AND_PORT 30
 
-#define SIZE_SOCKET_ARR 10
-#define COUNT_MAIN_SOCKETS 100
-#define MAX_SOCKET 1024
-#define SIZE_BUFFER 10000
-#define MAX_MSG 20
+typedef struct {
+    struct sockaddr_in addr;
+    int msg_numbers[MAX_MSGS];
+    int msg_count;
+    time_t last_activity;
+    int needs_response; 
+} ClientInfo;
 
-int sock_err(const char* function, int s);
+ClientInfo clients[MAX_CLIENTS];
+int num_clients = 0;
+
+void send_answer(ClientInfo client, int fd, struct sockaddr_in* addr, int addrlen);
+void fullfill_str(char* buffer, char* res_str, int* num, int*len, int* flag_end);
+void transform_to_date(uint32_t bytes, char* date);
+void form_id_of_client(char* begin, struct sockaddr_in client_addr);
+int check_poll(int p);
+void configuration(int* listen_socks, int start, int num_ports, struct pollfd* pfds);
+void check_bind(int b);
+int set_non_block_mode(int s);
+void check_socket(int s_desc);
+void check_file(FILE* file);
 void check_argc(int argc);
 void error(const char *msg);
-void read_argv(int argc, char** argv,  char* port_1, char* port_2);
-void check_socket(int s_desc);
-void init_socket(sockaddr_in* addr, int port);
-int set_non_block_mode(int s);
-void check_file(FILE* infile);
-void check_poll(int ev_cnt);
-void create_sockets(int* sockets_arr, int begin, int end, struct sockaddr_in* server_addr, struct pollfd* pfd);
-void transform_to_date(uint32_t bytes, char* date);
-void fullfill_str(char* buffer, char* res_str, int* num, int*len, int* flag_end);
-int check_msg_num(int* recieved_msg, int num);
-void send_answer(int* recieved, int fd, struct sockaddr_in* addr, int addrlen, int index);
 
-int main(int argc, char** argv)
-{
+int find_client(struct sockaddr_in *addr) {
+    for (int i = 0; i < num_clients; i++) {
+        if (clients[i].addr.sin_addr.s_addr == addr->sin_addr.s_addr &&
+            clients[i].addr.sin_port == addr->sin_port) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void remove_client(int index) {
+    fprintf(stdout, "DELETE ! ! ! !\n");
+    if (index >= 0 && index < num_clients) {
+        for (int i = index; i < num_clients - 1; i++) {
+            clients[i] = clients[i + 1];
+        }
+        num_clients--;
+    }
+}
+
+void add_client(struct sockaddr_in *addr, int msg_number) {
+    if (num_clients < FD_SETSIZE) {
+        clients[num_clients].addr = *addr;
+        for(int j = 0; j< MAX_MSGS;j++)clients[num_clients].msg_numbers[j] = -1;
+        clients[num_clients].msg_count = 0; // was 1
+        clients[num_clients].last_activity = time(NULL);
+        clients[num_clients].needs_response = 1;
+        num_clients++;
+    }
+}
+
+int is_duplicate(int client_index, int msg_number) {
+    ClientInfo *client = &clients[client_index];
+    for (int i = 0; i < client->msg_count; i++) {
+        if (client->msg_numbers[i] == msg_number) {
+            fprintf(stdout, "DUBL %d\n", client->msg_numbers[i]);
+            return 1;
+        }
+    }
+    if (client->msg_count < MAX_MSGS) {
+        client->msg_numbers[client->msg_count++] = msg_number;
+    }
+    client->last_activity = time(NULL);
+    client->needs_response = 1;
+    return 0;
+}
+
+void cleanup_clients() {
+    time_t current_time = time(NULL);
+    for (int i = 0; i < num_clients; i++) {
+        if (difftime(current_time, clients[i].last_activity) > 30) {
+            fprintf(stdout, "Client %d has been removed", i);
+            remove_client(i);
+            i--;
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
     check_argc(argc);
 
-    char* server_port_one = (char*)malloc(SIZE_SOCKET_ARR);
-    char* server_port_two = (char*)malloc(SIZE_SOCKET_ARR);
-    read_argv(argc, argv, server_port_one, server_port_two);
-    int port_1 = atoi(server_port_one), port_2 = atoi(server_port_two);
+    int start_port = atoi(argv[1]);
+    int end_port = atoi(argv[2]);
+    int num_ports = end_port - start_port + 1;
+    int listen_socks[num_ports];
+    struct pollfd pfds[num_ports];
+
+    FILE *logfile = fopen(FILENAME, "w");
+    check_file(logfile);
+
+    configuration(listen_socks, start_port, num_ports, pfds);
+
+    int flag_end =0;
     
-
-    struct sockaddr_in server_addr;
-    struct pollfd pfd[MAX_SOCKET];
-    init_socket(&server_addr, port_1);
-    int addrlen = sizeof(server_addr);
-    int s[COUNT_MAIN_SOCKETS]= {0};
-    create_sockets(s, port_1, port_2, &server_addr, pfd);
-
-
-    FILE* file = fopen("msg.txt", "w+");
-    check_file(file);
-
-    struct sockaddr_in clients[MAX_SOCKET];
-    int num_clients = 0, flag_end = 0, recieved_msg[MAX_MSG], index = 0;
-    for(int i = 0; i <MAX_MSG; i++)recieved_msg[i]= -1;
-
-    fprintf(stdout, "Server started. Listening on ports...\n");
-
-    do
+    while (flag_end!=1) 
     {
-        int ev_cnt = poll(pfd, sizeof(pfd) / sizeof(pfd[0]), 1000);
-        check_poll(ev_cnt);
-        for(int j = 0; j<index+1;j++)
-                {
-                    recieved_msg[j] = -1;
-                    
-                }
-                index = 0;
-        for (int i = 0; i <= port_2 - port_1; i++)
+        int poll_count = poll(pfds, num_ports, TIMEOUT);
+        if(check_poll(poll_count)==TIMEOUT_IN_POLL)continue;
+
+        for (int i = 0; i < num_ports; i++) 
         {
-            if (pfd[i].revents & POLLHUP)
+            if (pfds[i].revents & POLLIN) 
             {
-                for(int j = 0; j<index+1;j++)
-                {
-                    recieved_msg[j] = 0;
-                    
-                }
-                index = 0;
-                close(pfd[i].fd);
-            }
-            if (pfd[i].revents & POLLERR)
-            {
-                close(pfd[i].fd);
-            }
-            if (pfd[i].revents & POLLIN)
-            {
-                char buffer[SIZE_BUFFER] = {'\0'};
+                char* buffer = (char*)calloc(BUFFER_SIZE, 1);
+
                 struct sockaddr_in client_addr;
                 socklen_t client_len = sizeof(client_addr);
+                int r = recvfrom(pfds[i].fd, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&client_addr, &client_len);
 
-                ssize_t bytes = recvfrom(pfd[i].fd, buffer, sizeof(buffer), 0, (struct sockaddr *)&client_addr, &client_len);
-                if (bytes == -1)error("ERROR in recv");
-                else 
+                if (r > 0) 
                 {
-                    char client_id[INET_ADDRSTRLEN] = {'\0'}; 
-                    char client_port[10] = {'\0'};
-                    char begin[20] = {'\0'};
-                    sprintf(client_id, "%s", inet_ntoa(client_addr.sin_addr));
-                    sprintf(client_port, "%d", ntohs(client_addr.sin_port));
-                    sprintf(begin, "%s:%s ", client_id, client_port);
+                    char begin[ADDR_AND_PORT] = {'\0'};
+                    form_id_of_client(begin, client_addr);
 
-                    int client_index = -1;
-                    for (int j = 0; j < num_clients; j++) {
-                        if (strcmp(client_id, inet_ntoa(clients[j].sin_addr)) == 0 && ntohs(client_addr.sin_port) == ntohs(clients[j].sin_port))
-                        {
-                            client_index = j;
-                            break;
-                        }
+                    char* res_str= (char*)calloc(BUFFER_SIZE, 1);
+                    int msg_number = 0, msg_len = 0;
+                    fullfill_str(buffer, res_str, &msg_number, &msg_len, &flag_end);
+
+                    int client_index = find_client(&client_addr);
+                    if (client_index == -1) {
+                        add_client(&client_addr, msg_number);
+                        client_index = num_clients - 1;
                     }
 
-                    if (client_index == -1) 
+                    if (!is_duplicate(client_index, msg_number)) 
                     {
-                        if (num_clients >= MAX_SOCKET) 
-                        {
-                            fprintf(stdout, "Maximum number of clients reached\n");
-                            continue;
-                        }
-                        client_index = num_clients++;
-                        clients[client_index] = client_addr;
-                    } 
-     
-                    char res_str[SIZE_BUFFER] = { '\0' }, result[SIZE_BUFFER] = {'\0'};
-                    int msg_num = 0, msg_len = 0;
-                    fullfill_str(buffer, res_str, &msg_num, &msg_len, &flag_end);
-                    sprintf(result, "%s%s", begin, res_str);
-                    long position = 0;
-                    if(check_msg_num(recieved_msg, msg_num)==0)
-                    {
-                        position = ftell(file);
-                        fseek(file, 0, SEEK_SET);
-                        char line[SIZE_BUFFER];
-                        int is_duplicate = 0;
-                        while (fgets(line, SIZE_BUFFER, file) != NULL) {
-                            if (strncmp(line, result, 54) == 0) {
-                                is_duplicate = 1;
-                                break;
-                            }
-                        }
-                        fseek(file, position, SEEK_SET);
-
-                        if (!is_duplicate) { 
-                            
-                             fprintf(file, "%s\n", result);
-                             //fprintf(file, "%s\n", res_str);
-                        }
-
-                        recieved_msg[index] = msg_num;
-                        index++;
-                        
-                        //printf("Received message from %s:%d: %s\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), res_str);
-                        send_answer(recieved_msg, pfd[i].fd, &clients[client_index], client_len, index);
-                        if(flag_end==1)break;
+                        fprintf(logfile, "%s", begin);
+                        fprintf(logfile, "%s\n", res_str);
                     }
-                    else continue;
-                    
                 }
             }
+
+            if (pfds[i].revents & POLLOUT) {
+                for (int j = 0; j < num_clients; j++) {
+                    if (clients[j].needs_response) {
+                        fprintf(stdout, "Client index^ %d\n", j);
+                        send_answer(clients[j], pfds[i].fd, &clients[j].addr, sizeof(clients[j].addr));
+                        clients[j].needs_response = 0;  
+                    }
+                }
+                if(flag_end==1){fprintf(stdout, "END FLAG\n");break;}
+            }
         }
-        if(flag_end == 1)break;
-    } while (1);
-    
-    return 0;
+    }
+
+    fclose(logfile);
+    exit(EXIT_SUCCESS);
 }
 
-void send_answer(int* recieved, int fd, struct sockaddr_in* addr, int addrlen, int index)
+void form_id_of_client(char* begin, struct sockaddr_in client_addr)
 {
-    uint32_t copy[MAX_MSG];
-    char datagram[80] = {'\0'};
+    char client_id[INET_ADDRSTRLEN] = {'\0'}; 
+    char client_port[INET_ADDRSTRLEN] = {'\0'};
+    sprintf(client_id, "%s", inet_ntoa(client_addr.sin_addr));
+    sprintf(client_port, "%d", ntohs(client_addr.sin_port));
+    sprintf(begin, "%s:%s ", client_id, client_port);
+
+}
+void send_answer(ClientInfo client, int fd, struct sockaddr_in* addr, int addrlen){
+    uint32_t copy[MAX_MSGS];
+    char datagram[81] = {'\0'};
     int all_msg_len = 0;
-    for(int i = 0; i< index+1;i++)
+    fprintf(stdout, "NUMS:");
+    for(int i = 0; i< client.msg_count;i++)
     {
-        if(recieved[i]!=-1)copy[i] = htonl(recieved[i]);
+        if(client.msg_numbers[i]!=-1){copy[i] = htonl(client.msg_numbers[i]);
+        fprintf(stdout, "%d, ", client.msg_numbers[i]);
         memcpy(&datagram[all_msg_len], &copy[i], 4);
-        all_msg_len += 4;
-    }
-    //printf("SIZE OF DATA IS:  %d\n\n", all_msg_len);
+        all_msg_len += 4;}
+    };
+    printf("SIZE OF DATA IS:  %d\n\n", all_msg_len);
     sendto(fd, datagram, all_msg_len,MSG_NOSIGNAL, (struct sockaddr*)addr, addrlen);
-}
-
-int check_msg_num(int* recieved_msg, int num)
-{
-    for(int i = 0; i< MAX_MSG; i++)
-    {
-        if(recieved_msg[i]==num)return 1;
-
-    }
-    return 0;
 }
 
 void fullfill_str(char* buffer, char* res_str, int* num, int*len, int* flag_end)
 {
     int all_msg_len = 0;
-    char phone[13] = { '\0' }, date[20] = { '\0' }, message[SIZE_BUFFER] = { '\0' };
+    char phone[13] = { '\0' }, date[20] = { '\0' }, message[BUFFER_SIZE] = { '\0' };
     uint32_t num_msg_32, timestamp, msg_len_32;
 
     memcpy(&num_msg_32, &buffer[all_msg_len], 4);
@@ -229,55 +230,50 @@ void transform_to_date(uint32_t bytes, char* date) {
         tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
-void check_poll(int ev_cnt)
+int check_poll(int p)
 {
-    if(ev_cnt<0)
+    if (p < 0) 
     {
-        error("Timeout or error in POLL");
+        error("Error in poll");
     }
-}
-
-void create_sockets(int* sockets_arr, int begin, int end, struct sockaddr_in* server_addr, struct pollfd* pfd)
-{
-    int counter = 0;
-    for (int i = begin; i <= end; i++)
+    if (p == TIMEOUT_IN_POLL) 
     {
-        int s = socket(AF_INET, SOCK_DGRAM, 0);
-        check_socket(s);
-        set_non_block_mode(s);
-        sockets_arr[counter] = s;
-        
-
-        server_addr->sin_port = htons(i);
-
-        if (bind(s, (struct sockaddr *)server_addr, sizeof(*server_addr)) < 0)error("Smth happend in BIND");
-        
-        pfd[counter].fd = s;
-        pfd[counter].events = POLLIN;// | POLLOUT;
-        counter++;
+        cleanup_clients();
+        return TIMEOUT_IN_POLL;
     }
 }
 
-int sock_err(const char* function, int s)
+void configuration(int* listen_socks, int start, int num_ports, struct pollfd* pfds)
 {
-    int err;
-    err = errno;
-    fprintf(stderr, "%s: socket error: %d\n", function, err);
-    return -1;
+    for (int i = 0; i < num_ports; i++) {
+        listen_socks[i] = socket(AF_INET, SOCK_DGRAM, 0);
+        check_socket(listen_socks[i]);
+
+        set_non_block_mode(listen_socks[i]);
+
+        struct sockaddr_in server_addr;
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(start + i);
+
+        int b = bind(listen_socks[i], (struct sockaddr *)&server_addr, sizeof(server_addr));
+        check_bind(b);
+
+        pfds[i].fd = listen_socks[i];
+        pfds[i].events = POLLIN | POLLOUT;
+    }
 }
 
-void read_argv(int argc, char** argv,  char* port_1, char* port_2)
+void check_bind(int b)
 {
-     
-    memset(port_1, 0x00, sizeof(port_1));
-    memset(port_2, 0x00, sizeof(port_2));
+    if (b < 0)error("Error in BIND");
+}
 
-    strcpy(port_1, argv[1]);
-    strcpy(port_2, argv[2]);
-    
-    if (port_1 == NULL || port_2 == NULL) {
-        error("Invalid server ports\n");
-    }
+int set_non_block_mode(int s)
+{
+    int fl = fcntl(s, F_GETFL, 0);
+    return fcntl(s, F_SETFL, fl | O_NONBLOCK);
 }
 
 void check_socket(int s_desc)
@@ -288,25 +284,11 @@ void check_socket(int s_desc)
 	}
 }
 
-void init_socket(sockaddr_in* addr, int port)
+void check_file(FILE* file)
 {
-    memset(addr, 0, sizeof(*addr));
-    addr->sin_family = AF_INET;
-    addr->sin_port = htons(port);
-    addr->sin_addr.s_addr =  INADDR_ANY;
-}
-
-int set_non_block_mode(int s)
-{
-    int fl = fcntl(s, F_GETFL, 0);
-    return fcntl(s, F_SETFL, fl | O_NONBLOCK);
-}
-
-void check_file(FILE* infile)
-{
-    if (infile == NULL) 
+    if (file == NULL) 
     {
-        error("Unable to open input file");
+        error("Unable to open input file\n");
     }
 }
 
@@ -314,10 +296,9 @@ void check_argc(int argc)
 {
     if(argc!=3)
     {
-        error("Invalid count of arguments. Enter range of ports and try again");
+        error("Invalid count of arguments. Enter port, address, file name and try again\n");
     }
 }
-
 void error(const char *msg)
 {
     fprintf(stdout, "%s\n", msg);
