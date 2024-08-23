@@ -218,6 +218,7 @@ void recieve_msg(struct Node client)
         {
             fprintf(stdout, "INCOR\n");
             flag_stop = FALSE;
+            send(client.socket, "ok", 2, 0);
         }
         else if (strlen(sms) > 30)
         {
