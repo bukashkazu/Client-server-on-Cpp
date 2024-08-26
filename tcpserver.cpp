@@ -15,7 +15,8 @@
 #define MAX_CLIENTS 110
 #define SIZE_PORT 20
 #define ADDR_PORT_SIZE 30
-#define MAX_SIZE 350824
+#define MAX_SIZE 341000
+#define RECV_SIZE 4096
 #define TIMEOUT -5
 
 #define PUT_SIZE 3
@@ -44,7 +45,6 @@ void deinit();
 void error(const char* msg);
 void check_socket(int s_desc);
 void check_file(FILE* infile);
-int set_non_block_mode(int s);
 void init_clients_socket(struct Node* client_fd);
 int check_select(int s);
 void check_accept(int a);
@@ -61,7 +61,7 @@ int check_corectness(char* message)
     int flag = FALSE;
     if (message[2] != '.' || message[5] != '.' || message[10] != ' ' ||
         !isdigit(message[0]) || !isdigit(message[1]) || !isdigit(message[3]) || !isdigit(message[4]) ||
-        !isdigit(message[6]) || !isdigit(message[7]) || !isdigit(message[8]) || !isdigit(message[9])) 
+        !isdigit(message[6]) || !isdigit(message[7]) || !isdigit(message[8]) || !isdigit(message[9]))
     {
         flag = TRUE;
         fprintf(stdout, "Condition 1\n %c", message[2]);
@@ -71,12 +71,12 @@ int check_corectness(char* message)
         flag = TRUE;
         fprintf(stdout, "Condition 2\n");
     }
-    else if (message[20] != '+' || message[21] != '7' || !isdigit(message[22]) || !isdigit(message[23]) || !isdigit(message[23]) ||!isdigit(message[25]) || !isdigit(message[26]) || !isdigit(message[27]) || !isdigit(message[28]) || !isdigit(message[29]) || !isdigit(message[30])) 
+    else if (message[20] != '+' || message[21] != '7' || !isdigit(message[22]) || !isdigit(message[23]) || !isdigit(message[23]) || !isdigit(message[25]) || !isdigit(message[26]) || !isdigit(message[27]) || !isdigit(message[28]) || !isdigit(message[29]) || !isdigit(message[30]))
     {
         flag = TRUE;
         fprintf(stdout, "Condition 3\n %s", message);
     }
-    else if (message[31] == '\0') 
+    else if (message[31] == '\0')
     {
         flag = TRUE;
         fprintf(stdout, "Condition 4\n");
@@ -86,13 +86,15 @@ int check_corectness(char* message)
     else return CORRECT_FORMAT;
 }
 
+
 struct Node {
     SOCKET socket;
     struct sockaddr_in addr;
     int put_recieved;
     int msg_is_ready;
-    char* buf_bytes;
+    char* buf_bytes; // !!
     int count_of_bytes_recieved;
+    int msg_len;
     struct Node* next;
 };
 int flag_stop = FALSE;
@@ -102,25 +104,25 @@ FILE* file = NULL;
 int main(int argc, char* argv[])
 {
     check_argc(argc);
-    
+
     int port = read_argv(argv);
-    
+
     init();
 
-    SOCKET main_socket = socket(AF_INET, SOCK_STREAM, 0); 
+    SOCKET main_socket = socket(AF_INET, SOCK_STREAM, 0);
     check_socket(main_socket);
     //bset_reuseaddr(main_socket);
 
     struct sockaddr_in addr;
     init_socket(&addr, port);
-    
+
     int b = bind(main_socket, (struct sockaddr*)&addr, sizeof(addr));
     check_bind(b);
 
     int l = listen(main_socket, BACKLOG);
     check_listen(l);
 
-    set_non_block_mode(main_socket);
+    //set_non_block_mode(main_socket);
 
     fd_set readfd;
     SOCKET max_fd;
@@ -129,10 +131,10 @@ int main(int argc, char* argv[])
     init_clients_socket(clients_fd);
 
     int flag_client_disconected = RECV_IS_NORMAL;
-    file = fopen(FILENAME, "w+");
+    file = fopen(FILENAME, "w");
     check_file(file);
 
-    while (flag_stop==FALSE)
+    while (flag_stop == FALSE)
     {
         timeout.tv_sec = 5;
         timeout.tv_usec = 0;
@@ -149,7 +151,7 @@ int main(int argc, char* argv[])
             }
         }
         int s = select(max_fd + 1, &readfd, NULL, NULL, &timeout);
-        if(check_select(s) == TIMEOUT)continue;
+        if (check_select(s) == TIMEOUT)continue;
 
         if (FD_ISSET(main_socket, &readfd)) // если событие есть
         {
@@ -161,12 +163,11 @@ int main(int argc, char* argv[])
             put_new_socket_to_array(clients_fd, client_socket, &client_addr);
         }
 
-        for (int i = 0; i < MAX_CLIENTS; i++) 
+        for (int i = 0; i < MAX_CLIENTS; i++)
         {
-            if (FD_ISSET(clients_fd[i].socket, &readfd) && clients_fd[i].socket!=0)
+            if (FD_ISSET(clients_fd[i].socket, &readfd) && clients_fd[i].socket != 0)
             {
                 fprintf(stdout, "Recieving msg from client %d\n", i);
-                
 
                 recieve_put(&clients_fd[i], &flag_client_disconected);
                 if (clients_fd[i].put_recieved == PUT_RECIEVED && clients_fd[i].msg_is_ready == TRUE)
@@ -174,8 +175,8 @@ int main(int argc, char* argv[])
                     recieve_msg(clients_fd[i]);
                     memset(clients_fd[i].buf_bytes, 0x00, MAX_SIZE);
                     clients_fd[i].count_of_bytes_recieved = 0;
+                    clients_fd[i].msg_len = 0;
                     clients_fd[i].msg_is_ready = FALSE;
-
                 }
                 if (flag_client_disconected == CLIENT_DISCONECTED)
                 {
@@ -183,15 +184,19 @@ int main(int argc, char* argv[])
                     fprintf(stdout, "Client %d disconected\n\n", i);
                     FD_CLR(clients_fd[i].socket, &main_socket);
                     closesocket(clients_fd[i].socket);
-                    clients_fd[i].socket = 0;
+                    // Сдвигаем элементы массива, чтобы заполнить пустое место
+                    memmove(&clients_fd[i], &clients_fd[i + 1], (active_clients - i) * sizeof(struct Node));
+                    active_clients--;
+
+
                 }
-                
+
             }
         }
 
     }
 
-    for (int j = 0; j < MAX_CLIENTS; j++) 
+    for (int j = 0; j < MAX_CLIENTS; j++)
     {
         if (clients_fd[j].socket != 0) {
             closesocket(clients_fd[j].socket);
@@ -204,7 +209,7 @@ int main(int argc, char* argv[])
     return 0;
 }
 
-void recieve_msg(struct Node client) 
+void recieve_msg(struct Node client)
 {
     char* port_and_addr = (char*)calloc(ADDR_PORT_SIZE, 1);
     form_port_and_adr_msg(client, port_and_addr);
@@ -225,17 +230,19 @@ void recieve_msg(struct Node client)
             fprintf(stdout, "COR\n");
             fprintf(file, "%s\n", sms);
             send(client.socket, "ok", 2, 0);
+
+
         }
-        
+
     }
     free(sms);
 }
 
-int fullfill_str(char* buffer, char*sms)
+int fullfill_str(char* buffer, char* sms)
 {
-    int all_msg_len = 0; 
+    int all_msg_len = 0;
     char phone[13] = { '\0' }, date[20] = { '\0' };
-    char*message = (char*)calloc(MAX_SIZE, 1);
+    char* message = (char*)calloc(MAX_SIZE, 1);
 
     uint32_t num_msg_32, timestamp, msg_len_32;
 
@@ -253,7 +260,7 @@ int fullfill_str(char* buffer, char*sms)
     transform_to_date(timestamp, date);
     int msg_len = ntohl(msg_len_32);
 
-   
+
     char* tmp = (char*)calloc(MAX_SIZE, 1);
     if (tmp)
     {
@@ -271,14 +278,14 @@ int fullfill_str(char* buffer, char*sms)
             }
             else return INCORRECT_FORMAT;
         }
-        
+
     }
     free(message);
     free(tmp);
     return 0;
 }
 
-void transform_to_date(uint32_t bytes, char* date) 
+void transform_to_date(uint32_t bytes, char* date)
 {
     uint32_t unix_time = ntohl(bytes);
     time_t timestamp = unix_time;
@@ -294,12 +301,24 @@ void deinit()
     WSACleanup();
 }
 
-void recieve_put(struct Node* client,int* flag)
+void recieve_put(struct Node* client, int* flag)
 {
-    int r = recv(client->socket, &client->buf_bytes[client->count_of_bytes_recieved], MAX_SIZE, 0);
-    client->count_of_bytes_recieved += r;
 
+    int r = recv(client->socket, &(client->buf_bytes[client->count_of_bytes_recieved]), RECV_SIZE, 0);
+    client->count_of_bytes_recieved += r;
     (*flag) = check_recv(r);
+    
+   
+    if (client->msg_len == 0)
+    {
+        uint32_t msg_len_32 = 0;
+        if (client->count_of_bytes_recieved >= 24)
+        {
+            memcpy(&msg_len_32, &client->buf_bytes[20], 4);
+        }
+        int msg_len = ntohl(msg_len_32);
+        client->msg_len = msg_len;
+    }
 
     if (strncmp("put", client->buf_bytes, 3) == 0)
     {
@@ -308,8 +327,9 @@ void recieve_put(struct Node* client,int* flag)
         client->count_of_bytes_recieved -= 3;
     }
 
-    if (client->buf_bytes[client->count_of_bytes_recieved] == '\0')
+    if (client->count_of_bytes_recieved == client->msg_len + 24)
     {
+        fprintf(stdout, "Message ready\n");
         client->msg_is_ready = TRUE;
     }
 }
@@ -325,8 +345,6 @@ int check_recv(int r)
         }
     }
     else if (r == 0) {
-        // client disconected 
-        active_clients--;
         fprintf(stdout, "Client in check_recv disconected\n");
         return CLIENT_DISCONECTED;
     }
@@ -352,9 +370,9 @@ void form_port_and_adr_msg(struct Node client, char* begin)
 
 void put_new_socket_to_array(struct Node* clients_fd, SOCKET new_socket, struct sockaddr_in* addr)
 {
-    for (int i = 0; i < MAX_CLIENTS; i++) 
+    for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (clients_fd[i].socket == 0) 
+        if (clients_fd[i].socket == 0)
         {
             clients_fd[i].socket = new_socket;
             clients_fd[i].addr = (*addr);
@@ -378,13 +396,14 @@ int check_select(int s)
 
 void init_clients_socket(struct Node* client_fd)
 {
-    for (int i = 0; i < MAX_CLIENTS; i++) 
+    for (int i = 0; i < MAX_CLIENTS; i++)
     {
         client_fd[i].socket = 0;
         client_fd[i].count_of_bytes_recieved = 0;
         client_fd[i].msg_is_ready = FALSE;
         client_fd[i].put_recieved = PUT_NOT_RECIEVED;
         client_fd[i].buf_bytes = (char*)calloc(MAX_SIZE, 1);
+        client_fd[i].msg_len = 0;
     }
 }
 
@@ -408,11 +427,11 @@ void set_reuseaddr(int socket)
 {
     //Установка опции SO_REUSEADDR
     int optval = 1;
-    if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR) 
+    if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR)
     {
         error("Error establishing SO_REUSEADDR");
     }
- }
+}
 
 void init_socket(struct sockaddr_in* addr, int port)
 {
@@ -440,7 +459,7 @@ int read_argv(char** argv)
 {
     if (argv[1] == NULL)error("Invalid server addr or port");
     int port = 0;
-    if(argv[1])port = atoi(argv[1]);
+    if (argv[1])port = atoi(argv[1]);
 
     return port;
 }
