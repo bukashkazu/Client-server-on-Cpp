@@ -15,6 +15,10 @@
 #define FILENAME "msg.txt"
 #define TIMEOUT_IN_POLL 0
 #define ADDR_AND_PORT 30
+#define CLIENT_NOT_FOUND -1
+#define DUPLICATE 1
+#define UNIQ_NUM 0
+#define DATAGRAM 81
 
 typedef struct {
     struct sockaddr_in addr;
@@ -22,12 +26,17 @@ typedef struct {
     int msg_count;
     time_t last_activity;
     int needs_response; 
-} ClientInfo;
+} Client;
 
-ClientInfo clients[MAX_CLIENTS];
+Client clients[MAX_CLIENTS];
 int num_clients = 0;
 
-void send_answer(ClientInfo client, int fd, struct sockaddr_in* addr, int addrlen);
+void check_timeout();
+int find_client(struct sockaddr_in *addr);
+int is_dubl(int cli_index, int msg_number);
+void delete_client_from_base(int index);
+void add_new_client(struct sockaddr_in *addr, int msg_number);
+void send_answer(Client client, int fd, struct sockaddr_in* addr, int addrlen);
 void fullfill_str(char* buffer, char* res_str, int* num, int*len, int* flag_end);
 void transform_to_date(uint32_t bytes, char* date);
 void form_id_of_client(char* begin, struct sockaddr_in client_addr);
@@ -40,77 +49,21 @@ void check_file(FILE* file);
 void check_argc(int argc);
 void error(const char *msg);
 
-int find_client(struct sockaddr_in *addr) {
-    for (int i = 0; i < num_clients; i++) {
-        if (clients[i].addr.sin_addr.s_addr == addr->sin_addr.s_addr &&
-            clients[i].addr.sin_port == addr->sin_port) {
-            return i;
-        }
-    }
-    return -1;
-}
 
-void remove_client(int index) {
-    fprintf(stdout, "DELETE ! ! ! !\n");
-    if (index >= 0 && index < num_clients) {
-        for (int i = index; i < num_clients - 1; i++) {
-            clients[i] = clients[i + 1];
-        }
-        num_clients--;
-    }
-}
-
-void add_client(struct sockaddr_in *addr, int msg_number) {
-    if (num_clients < FD_SETSIZE) {
-        clients[num_clients].addr = *addr;
-        for(int j = 0; j< MAX_MSGS;j++)clients[num_clients].msg_numbers[j] = -1;
-        clients[num_clients].msg_count = 0; // was 1
-        clients[num_clients].last_activity = time(NULL);
-        clients[num_clients].needs_response = 1;
-        num_clients++;
-    }
-}
-
-int is_duplicate(int client_index, int msg_number) {
-    ClientInfo *client = &clients[client_index];
-    for (int i = 0; i < client->msg_count; i++) {
-        if (client->msg_numbers[i] == msg_number) {
-            fprintf(stdout, "DUBL %d\n", client->msg_numbers[i]);
-            return 1;
-        }
-    }
-    if (client->msg_count < MAX_MSGS) {
-        client->msg_numbers[client->msg_count++] = msg_number;
-    }
-    client->last_activity = time(NULL);
-    client->needs_response = 1;
-    return 0;
-}
-
-void cleanup_clients() {
-    time_t current_time = time(NULL);
-    for (int i = 0; i < num_clients; i++) {
-        if (difftime(current_time, clients[i].last_activity) > 30) {
-            fprintf(stdout, "Client %d has been removed", i);
-            remove_client(i);
-            i--;
-        }
-    }
-}
-
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) 
+{
     check_argc(argc);
 
-    int start_port = atoi(argv[1]);
-    int end_port = atoi(argv[2]);
-    int num_ports = end_port - start_port + 1;
+    int port_1 = atoi(argv[1]);
+    int port_2 = atoi(argv[2]);
+    int num_ports = port_2 - port_1 + 1;
     int listen_socks[num_ports];
     struct pollfd pfds[num_ports];
 
     FILE *logfile = fopen(FILENAME, "w");
     check_file(logfile);
 
-    configuration(listen_socks, start_port, num_ports, pfds);
+    configuration(listen_socks, port_1, num_ports, pfds);
 
     int flag_end =0;
     
@@ -139,12 +92,12 @@ int main(int argc, char *argv[]) {
                     fullfill_str(buffer, res_str, &msg_number, &msg_len, &flag_end);
 
                     int client_index = find_client(&client_addr);
-                    if (client_index == -1) {
-                        add_client(&client_addr, msg_number);
+                    if (client_index == CLIENT_NOT_FOUND) 
+                    {
+                        add_new_client(&client_addr, msg_number);
                         client_index = num_clients - 1;
                     }
-
-                    if (!is_duplicate(client_index, msg_number)) 
+                    if (!is_dubl(client_index, msg_number)) 
                     {
                         fprintf(logfile, "%s", begin);
                         fprintf(logfile, "%s\n", res_str);
@@ -152,10 +105,13 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            if (pfds[i].revents & POLLOUT) {
-                for (int j = 0; j < num_clients; j++) {
-                    if (clients[j].needs_response) {
-                        fprintf(stdout, "Client index^ %d\n", j);
+            if (pfds[i].revents & POLLOUT) 
+            {
+                for (int j = 0; j < num_clients; j++) 
+                {
+                    if (clients[j].needs_response) 
+                    {
+                        fprintf(stdout, "Client index: %d\n", j);
                         send_answer(clients[j], pfds[i].fd, &clients[j].addr, sizeof(clients[j].addr));
                         clients[j].needs_response = 0;  
                     }
@@ -178,9 +134,11 @@ void form_id_of_client(char* begin, struct sockaddr_in client_addr)
     sprintf(begin, "%s:%s ", client_id, client_port);
 
 }
-void send_answer(ClientInfo client, int fd, struct sockaddr_in* addr, int addrlen){
+
+void send_answer(Client client, int fd, struct sockaddr_in* addr, int addrlen)
+{
     uint32_t copy[MAX_MSGS];
-    char datagram[81] = {'\0'};
+    char datagram[DATAGRAM] = {'\0'};
     int all_msg_len = 0;
     fprintf(stdout, "NUMS:");
     for(int i = 0; i< client.msg_count;i++)
@@ -192,6 +150,67 @@ void send_answer(ClientInfo client, int fd, struct sockaddr_in* addr, int addrle
     };
     printf("SIZE OF DATA IS:  %d\n\n", all_msg_len);
     sendto(fd, datagram, all_msg_len,MSG_NOSIGNAL, (struct sockaddr*)addr, addrlen);
+}
+
+void check_timeout() 
+{
+    time_t current_time = time(NULL);
+    for (int i = 0; i < num_clients; i++) 
+    {
+        if (difftime(current_time, clients[i].last_activity) > 30) 
+        {
+            fprintf(stdout, "Client %d has been removed because of timeout", i);
+            delete_client_from_base(i);
+            i--;
+        }
+    }
+}
+
+int is_dubl(int cli_index, int msg_number) 
+{
+    Client *client = &clients[cli_index];
+    for (int i = 0; i < client->msg_count; i++) 
+    {
+        if (client->msg_numbers[i] == msg_number) 
+        {
+            fprintf(stdout, "DUBL %d\n", client->msg_numbers[i]);
+            return DUPLICATE;
+        }
+    }
+    /*if uniq -> add num to array*/
+    if (client->msg_count < MAX_MSGS) 
+    {
+        client->msg_numbers[client->msg_count++] = msg_number;
+    }
+    client->last_activity = time(NULL);
+    client->needs_response = 1;
+
+    return UNIQ_NUM;
+}
+
+void add_new_client(struct sockaddr_in *addr, int msg_number) 
+{
+    if (num_clients < MAX_CLIENTS) 
+    {
+        clients[num_clients].addr = *addr;
+        for(int j = 0; j< MAX_MSGS;j++)clients[num_clients].msg_numbers[j] = -1;
+        clients[num_clients].msg_count = 0;
+        clients[num_clients].last_activity = time(NULL);
+        clients[num_clients].needs_response = 1;
+        num_clients++;
+    }
+}
+
+void delete_client_from_base(int index) {
+    /*delete client from base if timeout*/
+    if (index >= 0 && index < num_clients) 
+    {
+        for (int i = index; i < num_clients - 1; i++) 
+        {
+            clients[i] = clients[i + 1];
+        }
+        num_clients--;
+    }
 }
 
 void fullfill_str(char* buffer, char* res_str, int* num, int*len, int* flag_end)
@@ -230,6 +249,18 @@ void transform_to_date(uint32_t bytes, char* date) {
         tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
+int find_client(struct sockaddr_in *addr) {
+    /* return index of found client*/
+    for (int i = 0; i < num_clients; i++) 
+    {
+        if (clients[i].addr.sin_addr.s_addr == addr->sin_addr.s_addr && clients[i].addr.sin_port == addr->sin_port)
+        {
+            return i;
+        }
+    }
+    return CLIENT_NOT_FOUND;
+}
+
 int check_poll(int p)
 {
     if (p < 0) 
@@ -238,7 +269,7 @@ int check_poll(int p)
     }
     if (p == TIMEOUT_IN_POLL) 
     {
-        cleanup_clients();
+        check_timeout();
         return TIMEOUT_IN_POLL;
     }
 }
