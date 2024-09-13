@@ -106,7 +106,7 @@ int main(int argc, char** argv)
 					if (check_if_num_in_list(recv_msg_num, recv_nums, count_of_recieved) == NUM_NOT_IN_LIST)
 					{
 						if (current->msg_num == recv_msg_num)current->recieved = RECIEVED; /// new
-						recv_nums[count_of_recieved] = recv_msg_num;
+						recv_nums[count_of_recieved] = recv_msg_num; ///// 
 						count_of_recieved++;
 					}
 
