@@ -179,10 +179,10 @@ int read_msgs_from_server(int sock, char* filename, char* addr, int port)
     
     FILE *file = fopen(filename, "w");
     check_file(file);
-
     int n = 0;
     while (n = read(sock, tmp, MAX_SIZE) > 0)
     {
+        fprintf(stdout, "%d\n", n);
         if(tmp[0] == '\n'){continue;}
 
         char* res = (char*)calloc(MAX_SIZE, 1);
@@ -215,6 +215,7 @@ void fullfill_str(char* buffer, char* res_str)
     int msg_len = ntohl(msg_len_32);
 
     sprintf(res_str, "%s %s %s", date, phone, message);
+    fprintf(stdout, "%s\n", res_str);
     //if (strcmp(message, "stop") == 0)flag_end = TRUE;
 }
 
